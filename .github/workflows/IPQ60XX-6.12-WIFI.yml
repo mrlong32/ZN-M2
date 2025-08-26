@@ -1,214 +1,174 @@
-name: IPQ60XX-6.12-WIFI-ZN-M2专用固件
+name: IPQ60XX-6.12-WIFI-ZN-M2
 
 on:
-  workflow_dispatch:  # 手动触发工作流
+  workflow_dispatch:
   schedule:
-    - cron: 0 19 * * *  # 每天19点自动运行
+    - cron: 0 19 * * *
 
 env:
-  # 源码配置
-  源码地址: https://github.com/LiBwrt/openwrt-6.x.git
-  源码分支: k6.12-nss
-  配置文件: configs/ipq60xx-6.12-wifi.config  # 确保此配置仅包含ZN-M2相关选项
-  自定义脚本: libwrt.sh
-  缓存工具链: true
-  # 上传配置
-  上传完整目录: false  # 关闭完整bin目录上传，减小体积
-  发布固件: true
-  固件标签: ZN-M2-IPQ60XX-6.12-WIFI  # 明确标记为ZN-M2固件
-  时区: Asia/Shanghai
-  # 设备名称（用于筛选文件，根据实际固件文件名调整）
-  设备名称: zn-m2
+  REPO_URL: https://github.com/LiBwrt/openwrt-6.x.git
+  REPO_BRANCH: k6.12-nss
+  CONFIG_FILE: configs/ipq60xx-6.12-wifi.config  # 确保此配置仅包含ZN-M2
+  DIY_SCRIPT: libwrt.sh
+  CLASH_KERNEL: amd64
+  CACHE_TOOLCHAIN: true
+  UPLOAD_BIN_DIR: false  # 关闭完整bin目录上传，只保留必要文件
+  FIRMWARE_RELEASE: true
+  FIRMWARE_TAG: ZN-M2-IPQ60XX-6.12-WIFI  # 明确标记为ZN-M2固件
+  TZ: Asia/Shanghai
+  # 新增：ZN-M2固件文件名关键字（根据实际生成的文件名调整）
+  DEVICE_NAME: zn-m2
 
 jobs:
-  编译固件:
+  Build:
     runs-on: ubuntu-22.04
     permissions:
-      contents: write  # 授予发布权限，修复权限不足问题
+      contents: write
 
     steps:
     - name: 检查服务器性能
       run: |
         echo "警告⚠：分配的服务器性能有限，请确保仅编译ZN-M2固件"
-        echo "--------------------------CPU信息--------------------------"
         echo "CPU核心信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c)"
-        echo "--------------------------磁盘信息--------------------------"
         df -hT
 
-    - name: 初始化编译环境
+    - name: 初始化环境
       env:
         DEBIAN_FRONTEND: noninteractive
       run: |
-        # 清理磁盘空间，避免编译中途空间不足
-        docker rmi $(docker images -q) || true
+        docker rmi $(docker images -q)
         sudo rm -rf /usr/share/dotnet /etc/apt/sources.list.d /usr/local/lib/android $AGENT_TOOLSDIRECTORY
         sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* powershell openjdk* mongodb* moby* || true
         sudo -E apt-get -y update
         sudo -E apt-get -y install $(curl -fsSL is.gd/depends_ubuntu_2204)
         sudo -E apt-get -y autoremove --purge
         sudo -E apt-get -y clean
-        sudo timedatectl set-timezone "${{ env.时区 }}"
+        sudo timedatectl set-timezone "$TZ"
 
     - name: 合并磁盘空间
       uses: easimon/maximize-build-space@master
       with:
-        swap-size-mb: 2048  # 增加交换空间到2GB，避免内存不足
+        swap-size-mb: 1024
         temp-reserve-mb: 100
         root-reserve-mb: 1024
 
-    - name: 检出工作流文件
+    - name: 检出代码
       uses: actions/checkout@main
 
-    - name: 克隆源码
+    - name: 克隆源代码
       run: |
-        git clone --depth 1 -b "${{ env.源码分支 }}" "${{ env.源码地址 }}" openwrt
+        git clone --depth 1 -b $REPO_BRANCH $REPO_URL openwrt
         cd openwrt
         echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
-        # 获取内核版本
-        内核版本=$(grep -oP 'LINUX_KERNEL_HASH-\K[0-9]+\.[0-9]+\.[0-9]+' target/linux/generic/kernel-6.12)
-        echo "内核版本=$内核版本" >> $GITHUB_ENV
-        echo "克隆源码完成，内核版本：$内核版本"
+        VERSION_KERNEL=$(grep -oP 'LINUX_KERNEL_HASH-\K[0-9]+\.[0-9]+\.[0-9]+' target/linux/generic/kernel-6.12)
+        echo "VERSION_KERNEL=$VERSION_KERNEL" >> $GITHUB_ENV
 
-    - name: 生成编译变量
+    - name: 生成变量
       run: |
-        cp "${{ env.配置文件 }}" "${{ env.OPENWRT_PATH }}/.config"
-        cd "${{ env.OPENWRT_PATH }}"
+        cp $CONFIG_FILE $OPENWRT_PATH/.config
+        cd $OPENWRT_PATH
         make defconfig > /dev/null 2>&1
-        源码名称=$(echo "${{ env.源码地址 }}" | awk -F '/' '{print $(NF)}')
-        echo "源码名称=$源码名称" >> $GITHUB_ENV
-        目标平台=$(cat .config | grep CONFIG_TARGET_BOARD | awk -F '"' '{print $2}')
-        echo "目标平台=$目标平台" >> $GITHUB_ENV
-        目标子平台=$(cat .config | grep CONFIG_TARGET_SUBTARGET | awk -F '"' '{print $2}')
-        echo "目标子平台=$目标子平台" >> $GITHUB_ENV
-        echo "生成变量完成，目标平台：$目标平台/$目标子平台"
+        SOURCE_REPO="$(echo $REPO_URL | awk -F '/' '{print $(NF)}')"
+        echo "SOURCE_REPO=$SOURCE_REPO" >> $GITHUB_ENV
+        DEVICE_TARGET=$(cat .config | grep CONFIG_TARGET_BOARD | awk -F '"' '{print $2}')
+        echo "DEVICE_TARGET=$DEVICE_TARGET" >> $GITHUB_ENV
+        DEVICE_SUBTARGET=$(cat .config | grep CONFIG_TARGET_SUBTARGET | awk -F '"' '{print $2}')
+        echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> $GITHUB_ENV
 
-    - name: 缓存编译工具链
-      if: env.缓存工具链 == 'true'
+    - name: 缓存工具链
+      if: env.CACHE_TOOLCHAIN == 'true'
       uses: HiGarfield/cachewrtbuild@main
       with:
         ccache: false
-        mixkey: ${{ env.源码名称 }}-${{ env.源码分支 }}-${{ env.目标平台 }}-${{ env.目标子平台 }}
+        mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
         prefix: ${{ env.OPENWRT_PATH }}
-      continue-on-error: true  # 缓存失败不中断流程
-
-    - name: 安装软件包 feeds
+    
+    - name: 安装软件源
       run: |
-        cd "${{ env.OPENWRT_PATH }}"
+        cd $OPENWRT_PATH
         ./scripts/feeds update -a
-        # 安装额外软件包
         git clone --depth 1 https://github.com/sbwml/openwrt_pkgs.git package/new/custom
         mv package/new/custom/luci-app-netspeedtest  package/new
         mv package/new/custom/speedtest-cli package/new
         rm -rf package/new/custom
         ./scripts/feeds install -a
-        echo "软件包feeds安装完成"
-
+  
     - name: 加载自定义配置
       run: |
-        # 复制自定义文件
-        [ -e files ] && mv files "${{ env.OPENWRT_PATH }}/files"
-        [ -e "${{ env.配置文件 }}" ] && mv "${{ env.配置文件 }}" "${{ env.OPENWRT_PATH }}/.config"
-        chmod +x "${{ env.自定义脚本 }}"
-        cd "${{ env.OPENWRT_PATH }}"
-        $GITHUB_WORKSPACE/${{ env.自定义脚本 }}
-        
-        # 关键：强制只保留ZN-M2设备配置（防止编译其他设备）
-        echo "强制启用ZN-M2设备配置"
-        # 禁用所有其他设备
-        grep -E "CONFIG_TARGET_DEVICE_${目标平台}_${目标子平台}_DEVICE_" .config | grep -v "${{ env.设备名称 }}" | while read -r line; do
-          echo "${line%=y}=n" >> .config
-        done
-        # 强制启用ZN-M2
-        echo "CONFIG_TARGET_DEVICE_${目标平台}_${目标子平台}_DEVICE_${{ env.设备名称 }}=y" >> .config
-        # 应用配置
-        make defconfig
-        echo "自定义配置加载完成，仅启用ZN-M2设备"
+        [ -e files ] && mv files $OPENWRT_PATH/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE $OPENWRT_PATH/.config
+        chmod +x $DIY_SCRIPT
+        cd $OPENWRT_PATH
+        $GITHUB_WORKSPACE/$DIY_SCRIPT
+        # 关键：强制只保留ZN-M2设备配置（根据实际设备名称调整）
+        echo "CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_zn_m2=y" >> .config
+        echo "# 禁用其他设备" >> .config
+        grep -E "CONFIG_TARGET_DEVICE_qualcommax_ipq60xx_DEVICE_" .config | grep -v "$DEVICE_NAME" | sed 's/=y/=n/' >> .config
+        make defconfig  # 应用配置
 
-    - name: 下载DL软件包
+    - name: 下载依赖包
       run: |
-        cd "${{ env.OPENWRT_PATH }}"
+        cd $OPENWRT_PATH
         make defconfig
         make download -j8
-        # 清理无效文件（小于1KB的可能是下载失败的）
         find dl -size -1024c -exec rm -f {} \;
-        echo "DL软件包下载完成"
 
-    - name: 开始编译固件（仅ZN-M2）
+    - name: 编译固件 (仅ZN-M2)
       id: compile
       run: |
-        cd "${{ env.OPENWRT_PATH }}"
-        echo "使用 $(nproc) 线程编译"
-        # 编译失败时重试（第一次失败可能是资源竞争）
+        cd $OPENWRT_PATH
+        echo -e "$(nproc) 线程编译"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
-        echo "编译时间=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
-        echo "文件日期=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
-        echo "固件编译完成"
+        echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
+        echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
 
-    - name: 检查磁盘空间使用情况
+    - name: 检查空间使用情况
       if: (!cancelled())
       run: df -hT
 
-    - name: 整理固件文件（仅保留ZN-M2）
+    - name: 整理文件 (仅保留ZN-M2固件)
       if: steps.compile.outputs.status == 'success'
       run: |
-        # 进入固件输出目录
-        固件目录="${{ env.OPENWRT_PATH }}/bin/targets/${{ env.目标平台 }}/${{ env.目标子平台 }}"
-        cd "$固件目录" || { echo "错误：找不到固件目录 $固件目录"; exit 1; }
-        
+        # 进入固件目录
+        cd $OPENWRT_PATH/bin/targets/${DEVICE_TARGET}/${DEVICE_SUBTARGET}
         # 显示所有生成的文件（用于调试）
         echo "编译生成的所有文件："
         ls -l
-        
-        # 创建专用目录存放ZN-M2固件
-        mkdir -p zn-m2-固件
-        # 移动ZN-M2相关文件（匹配文件名中的设备名称）
-        匹配文件=$(find . -maxdepth 1 -type f -name "*${{ env.设备名称 }}*" ! -name "*.buildinfo" ! -name "*.manifest")
-        if [ -z "$匹配文件" ]; then
-          echo "警告：未找到ZN-M2相关固件文件，可能编译出错"
-          ls -l  # 显示所有文件供调试
-          exit 1  # 找不到文件时终止流程
-        fi
-        mv $匹配文件 zn-m2-固件/
-        # 移动配置文件
-        [ -f .config ] && cp .config zn-m2-固件/编译配置.config
-        # 保存固件路径
-        echo "FIRMWARE_PATH=$PWD/zn-m2-固件" >> $GITHUB_ENV
-        
-        # 显示最终要发布的文件
-        echo "最终发布的ZN-M2固件文件："
-        ls -l zn-m2-固件/
+        # 只保留ZN-M2相关文件（忽略其他设备）
+        mkdir -p zn-m2-firmware
+        mv *${DEVICE_NAME}*.bin zn-m2-firmware/
+        mv *${DEVICE_NAME}*.img zn-m2-firmware/
+        mv *${DEVICE_NAME}*.sha256 zn-m2-firmware/  # 保留校验文件
+        mv build.config zn-m2-firmware/  # 保留配置文件
+        echo "FIRMWARE_PATH=$PWD/zn-m2-firmware" >> $GITHUB_ENV
+        # 显示最终保留的文件
+        echo "最终发布的文件："
+        ls -l zn-m2-firmware/
 
-    - name: 上传ZN-M2固件到工件（Artifact）
-      if: steps.compile.outputs.status == 'success' && env.发布固件 != 'true'
+    - name: 上传ZN-M2固件到制品
+      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE != 'true'
       uses: actions/upload-artifact@main
       with:
-        name: zn-m2-固件-${{ env.文件日期 }}
+        name: zn-m2-firmware-${{ env.FILE_DATE }}
         path: ${{ env.FIRMWARE_PATH }}
-        retention-days: 30  # 保留30天
 
-    - name: 发布ZN-M2固件到Release
-      if: steps.compile.outputs.status == 'success' && env.发布固件 == 'true'
+    - name: 上传ZN-M2固件到发布
+      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
       uses: ncipollo/release-action@v1
       with:
-        name: ZN-M2 固件 ${内核版本}（${{ env.编译时间 }}）
-        allowUpdates: true  # 允许更新已存在的标签
-        tag: ${{ env.固件标签 }}
+        name: ZN-M2 固件 ${VERSION_KERNEL} (${{ env.DATE }})
+        allowUpdates: true
+        tag: ${{ env.FIRMWARE_TAG }}
         token: ${{ secrets.GITHUB_TOKEN }}
-        artifacts: ${{ env.FIRMWARE_PATH }}/*  # 仅上传ZN-M2专用文件
+        artifacts: ${{ env.FIRMWARE_PATH }}/*  # 仅上传ZN-M2目录下的文件
         body: |
-          ## ZN-M2 专用 OpenWrt 固件
-          编译日期：${{ env.编译时间 }}
-          内核版本：${{ env.内核版本 }}
-          
-          ### 基本信息
+          **ZN-M2 专用 OpenWrt 固件**
+          ### 固件信息
+          - 内核版本：${{ env.VERSION_KERNEL }}
+          - 编译日期：${{ env.DATE }}
           - 适用设备：ZN-M2
-          - 源码地址：${{ env.源码地址 }}
-          - 源码分支：${{ env.源码分支 }}
-          - 默认管理地址：192.168.1.1
-          - 默认登录密码：password
-          
-          ### 注意事项
-          1. 刷写前请确认设备型号为ZN-M2
-          2. 首次刷写建议保留配置选项为"不保留"
-          3. 如有问题请查看GitHub Actions编译日志
+          - 源码地址：${{ env.REPO_URL }}
+          - 源码分支：${{ env.REPO_BRANCH }}
+          - 默认地址：192.168.1.1
+          - 默认密码：password
