@@ -12,7 +12,7 @@ env:
   DIY_SCRIPT: libwrt.sh
   CLASH_KERNEL: amd64
   CACHE_TOOLCHAIN: true
-  UPLOAD_BIN_DIR: false
+  UPLOAD_BIN_DIR: true  # 启用上传bin目录
   FIRMWARE_RELEASE: true
   FIRMWARE_TAG: IPQ60XX-6.12-WIFI
   TZ: Asia/Shanghai
@@ -20,6 +20,8 @@ env:
 jobs:
   Build:
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write  # 添加发布权限
 
     steps:
     - name: Check Server Performance(检查服务器性能)
@@ -141,13 +143,25 @@ jobs:
     - name: Organize Files(整理文件)
       if: steps.compile.outputs.status == 'success'
       run: |
-        cd $OPENWRT_PATH/bin/targets/*/*
+        echo "查看固件目录结构："
+        ls -R $OPENWRT_PATH/bin/targets
+        
+        # 确保目录存在
+        if [ -d "$OPENWRT_PATH/bin/targets/${DEVICE_TARGET}/${DEVICE_SUBTARGET}" ]; then
+          cd $OPENWRT_PATH/bin/targets/${DEVICE_TARGET}/${DEVICE_SUBTARGET}
+        else
+          # 尝试通用路径匹配
+          cd $OPENWRT_PATH/bin/targets/*/* || { echo "找不到固件目录"; exit 1; }
+        fi
+        
         cat sha256sums
         cp $OPENWRT_PATH/.config build.config
-        mv -f $OPENWRT_PATH/bin/packages/*/*/*.apk packages
-        tar -zcf Packages.tar.gz packages
+        mv -f $OPENWRT_PATH/bin/packages/*/*/*.apk packages || true
+        tar -zcf Packages.tar.gz packages || true
         rm -rf packages feeds.buildinfo version.buildinfo
         echo "FIRMWARE_PATH=$PWD" >> $GITHUB_ENV
+        echo "最终固件目录内容："
+        ls -l
 
     - name: Upload Firmware To Artifact(将固件上传到Artifact)
       if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE != 'true'
