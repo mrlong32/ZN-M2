@@ -1,0 +1,206 @@
+name: IPQ60XX-6.12-WIFI-ZN-M2
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: 0 19 * * *
+
+env:
+  REPO_URL: https://github.com/LiBwrt/openwrt-6.x.git
+  REPO_BRANCH: k6.12-nss
+  CONFIG_FILE: configs/ipq60xx-6.12-wifi.config
+  DIY_SCRIPT: libwrt.sh
+  CACHE_TOOLCHAIN: true
+  UPLOAD_BIN_DIR: true  # 保留全量备份（可选关闭）
+  FIRMWARE_RELEASE: true
+  FIRMWARE_TAG: IPQ60XX-6.12-WIFI-ZN-M2  # 明确设备标识
+  TZ: Asia/Shanghai
+  # 关键：指定需要保留的固件文件名关键字
+  KEEP_FILES: "zn_m2-squashfs"  # 匹配设备的文件
+  # 可选：排除不需要的文件（如 apk）
+  EXCLUDE_FILES: "*.apk *.ipk"
+
+jobs:
+  Build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+    - name: 检查服务器性能
+      run: |
+        echo "警告⚠：分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
+        echo -e "已知CPU型号（降序）：7763，8370C，8272CL，8171M，E5-2673 \n"
+        echo "--------------------------CPU信息--------------------------"
+        echo "CPU物理数量：$(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
+        echo -e "CPU核心信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
+        echo "--------------------------内存信息--------------------------"
+        echo "已安装内存详细信息："
+        echo -e "$(sudo lshw -short -C memory | grep GiB) \n"
+        echo "--------------------------硬盘信息--------------------------"
+        echo "硬盘数量：$(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
+    
+    - name: 初始化环境
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        docker rmi $(docker images -q)
+        sudo rm -rf /usr/share/dotnet /etc/apt/sources.list.d /usr/local/lib/android $AGENT_TOOLSDIRECTORY
+        sudo -E apt-get -y purge azure-cli ghc* zulu* llvm* firefox google* dotnet* powershell openjdk* mongodb* moby* || true
+        sudo -E apt-get -y update
+        sudo -E apt-get -y install $(curl -fsSL is.gd/depends_ubuntu_2204)
+        sudo -E systemctl daemon-reload
+        sudo -E apt-get -y autoremove --purge
+        sudo -E apt-get -y clean
+        sudo timedatectl set-timezone "$TZ"
+    
+    - name: 合并磁盘空间
+      uses: easimon/maximize-build-space@master
+      with:
+        swap-size-mb: 1024
+        temp-reserve-mb: 100
+        root-reserve-mb: 1024
+
+    - name: 检出代码
+      uses: actions/checkout@main
+
+    - name: 克隆源代码
+      run: |
+        df -hT $GITHUB_WORKSPACE
+        git clone --depth 1 -b $REPO_BRANCH $REPO_URL openwrt
+        cd openwrt
+        echo "OPENWRT_PATH=$PWD" >> $GITHUB_ENV
+        VERSION_INFO=$(git show -s --date=short --format="作者: %an<br/>时间: %cd<br/>内容: %s<br/>hash: %H")
+        echo "VERSION_INFO=$VERSION_INFO" >> $GITHUB_ENV
+        VERSION_KERNEL=$(grep -oP 'LINUX_KERNEL_HASH-\K[0-9]+\.[0-9]+\.[0-9]+' target/linux/generic/kernel-6.12)
+        echo "VERSION_KERNEL=$VERSION_KERNEL" >> $GITHUB_ENV
+    
+    - name: 生成变量
+      run: |
+        cp $CONFIG_FILE $OPENWRT_PATH/.config
+        cd $OPENWRT_PATH
+        make defconfig > /dev/null 2>&1
+        SOURCE_REPO="$(echo $REPO_URL | awk -F '/' '{print $(NF)}')"
+        echo "SOURCE_REPO=$SOURCE_REPO" >> $GITHUB_ENV
+        DEVICE_TARGET=$(cat .config | grep CONFIG_TARGET_BOARD | awk -F '"' '{print $2}')
+        echo "DEVICE_TARGET=$DEVICE_TARGET" >> $GITHUB_ENV
+        DEVICE_SUBTARGET=$(cat .config | grep CONFIG_TARGET_SUBTARGET | awk -F '"' '{print $2}')
+        echo "DEVICE_SUBTARGET=$DEVICE_SUBTARGET" >> $GITHUB_ENV
+    
+    - name: 缓存工具链
+      if: env.CACHE_TOOLCHAIN == 'true'
+      uses: HiGarfield/cachewrtbuild@main
+      with:
+        ccache: false
+        mixkey: ${{ env.SOURCE_REPO }}-${{ env.REPO_BRANCH }}-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}
+        prefix: ${{ env.OPENWRT_PATH }}
+
+    - name: 安装 Feeds（仅保留官方源）
+      run: |
+        cd $OPENWRT_PATH
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+    
+    - name: 加载自定义配置
+      run: |
+        [ -e files ] && mv files $OPENWRT_PATH/files
+        [ -e $CONFIG_FILE ] && mv $CONFIG_FILE $OPENWRT_PATH/.config
+        chmod +x $DIY_SCRIPT
+        cd $OPENWRT_PATH
+        $GITHUB_WORKSPACE/$DIY_SCRIPT
+    
+    - name: 下载依赖包
+      run: |
+        cd $OPENWRT_PATH
+        make defconfig
+        make download -j8
+        find dl -size -1024c -exec ls -l {} \;
+        find dl -size -1024c -exec rm -f {} \;
+    
+    - name: 编译固件
+      id: compile
+      run: |
+        cd $OPENWRT_PATH
+        echo -e "$(nproc) 线程编译"
+        make -j$(nproc) || make -j1 || make -j1 V=s
+        echo "status=success" >> $GITHUB_OUTPUT
+        echo "DATE=$(date +"%Y-%m-%d %H:%M:%S")" >> $GITHUB_ENV
+        echo "FILE_DATE=$(date +"%Y.%m.%d")" >> $GITHUB_ENV
+    
+    - name: 检查空间使用
+      if: (!cancelled())
+      run: df -hT
+
+    # 1. 全量 Bin 备份（可选保留）
+    - name: 上传全量 Bin 目录
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
+      uses: actions/upload-artifact@main
+      with:
+        name: ${{ env.SOURCE_REPO }}-bin-${{ env.DEVICE_TARGET }}-${{ env.DEVICE_SUBTARGET }}-${{ env.FILE_DATE }}
+        path: ${{ env.OPENWRT_PATH }}/bin
+
+    # 2. 整理并仅保留 ZN-M2 固件
+    - name: 整理 ZN-M2 固件（仅保留指定文件）
+      if: steps.compile.outputs.status == 'success'
+      run: |
+        # 进入固件目录
+        cd $OPENWRT_PATH/bin/targets/${DEVICE_TARGET}/${DEVICE_SUBTARGET}
+        echo "原始固件目录内容："
+        ls -l
+        # 创建纯净目录
+        mkdir -p zn-m2-pure
+        # 仅复制包含 $KEEP_FILES 的文件
+        for file in *; do
+            if [[ $file == *"$KEEP_FILES"* ]]; then
+                cp -v "$file" zn-m2-pure/
+            fi
+        done
+        # 排除不需要的文件（如 apk）
+        if [ -n "$EXCLUDE_FILES" ]; then
+            cd zn-m2-pure
+            rm -f $EXCLUDE_FILES
+            cd ..
+        fi
+        # 检查是否有文件
+        if [ -z "$(ls -A zn-m2-pure)" ]; then
+            echo "错误：未找到匹配 $KEEP_FILES 的固件文件！"
+            exit 1
+        fi
+        echo "纯净目录内容："
+        ls -l zn-m2-pure
+        echo "FIRMWARE_PATH=$PWD/zn-m2-pure" >> $GITHUB_ENV
+    
+    # 3. 上传纯净固件到 Artifact（确保触发）
+    - name: 上传纯净固件到 Artifact
+      if: steps.compile.outputs.status == 'success'
+      uses: actions/upload-artifact@main
+      with:
+        name: zn-m2-firmware-${{ env.FILE_DATE }}
+        path: ${{ env.FIRMWARE_PATH }}
+
+    # 4. 修复 Release 发布（精确匹配文件）
+    - name: 发布固件到 Release
+      if: steps.compile.outputs.status == 'success' && env.FIRMWARE_RELEASE == 'true'
+      uses: ncipollo/release-action@v1
+      with:
+        name: ZN-M2 固件 ${VERSION_KERNEL} (${{ env.DATE }})
+        allowUpdates: true
+        tag: ${{ env.FIRMWARE_TAG }}-${{ env.FILE_DATE }}
+        token: ${{ secrets.GITHUB_TOKEN }}
+        # 精确匹配需要发布的文件
+        artifacts: |
+          ${{ env.FIRMWARE_PATH }}/*zn_m2-squashfs-factory.ubi
+          ${{ env.FIRMWARE_PATH }}/*zn_m2-squashfs-sysupgrade.bin
+          ${{ env.FIRMWARE_PATH }}/build.config  # 可选保留配置
+        body: |
+          **ZN-M2 专用 OpenWrt 固件**
+          ### 固件信息
+          - 内核版本：${{ env.VERSION_KERNEL }}
+          - 编译日期：${{ env.DATE }}
+          - 适用设备：ZN-M2
+          - 源码地址：${{ env.REPO_URL }}
+          - 源码分支：${{ env.REPO_BRANCH }}
+          - 默认地址：192.168.1.1
+          - 默认密码：password
+        # 解决 Warning：忽略不存在的文件类型
+        skipIfNoFiles: true  # 无匹配文件时跳过（避免报错）
